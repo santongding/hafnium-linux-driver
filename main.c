@@ -31,7 +31,7 @@
 #include <net/sock.h>
 
 #include <hf/call.h>
-#include <hf/spci.h>
+#include <hf/ffa.h>
 #include <hf/transport.h>
 
 #include "uapi/hf/socket.h"
@@ -45,7 +45,7 @@
 
 struct hf_vcpu {
 	struct hf_vm *vm;
-	spci_vcpu_index_t vcpu_index;
+	ffa_vcpu_index_t vcpu_index;
 	struct task_struct *task;
 	atomic_t abort_sleep;
 	atomic_t waiting_for_message;
@@ -53,8 +53,8 @@ struct hf_vcpu {
 };
 
 struct hf_vm {
-	spci_vm_id_t id;
-	spci_vcpu_count_t vcpu_count;
+	ffa_vm_id_t id;
+	ffa_vcpu_count_t vcpu_count;
 	struct hf_vcpu *vcpu;
 };
 
@@ -78,7 +78,7 @@ static struct proto hf_sock_proto = {
 };
 
 static struct hf_vm *hf_vms;
-static spci_vm_count_t hf_vm_count;
+static ffa_vm_count_t hf_vm_count;
 static struct page *hf_send_page;
 static struct page *hf_recv_page;
 static atomic64_t hf_next_port = ATOMIC64_INIT(0);
@@ -87,12 +87,12 @@ static DEFINE_HASHTABLE(hf_local_port_hash, 7);
 static DEFINE_SPINLOCK(hf_local_port_hash_lock);
 static int hf_irq;
 static enum cpuhp_state hf_cpuhp_state;
-static spci_vm_id_t current_vm_id;
+static ffa_vm_id_t current_vm_id;
 
 /**
  * Retrieves a VM from its ID, returning NULL if the VM doesn't exist.
  */
-static struct hf_vm *hf_vm_from_id(spci_vm_id_t vm_id)
+static struct hf_vm *hf_vm_from_id(ffa_vm_id_t vm_id)
 {
 	if (vm_id < FIRST_SECONDARY_VM_ID ||
 	    vm_id >= FIRST_SECONDARY_VM_ID + hf_vm_count)
@@ -155,8 +155,8 @@ static enum hrtimer_restart hf_vcpu_timer_expired(struct hrtimer *timer)
  *
  * It wakes up the thread if it's sleeping, or kicks it if it's already running.
  */
-static void hf_handle_wake_up_request(spci_vm_id_t vm_id,
-				      spci_vcpu_index_t vcpu)
+static void hf_handle_wake_up_request(ffa_vm_id_t vm_id,
+				      ffa_vcpu_index_t vcpu)
 {
 	struct hf_vm *vm = hf_vm_from_id(vm_id);
 
@@ -185,10 +185,10 @@ static void hf_handle_wake_up_request(spci_vm_id_t vm_id,
  * Injects an interrupt into a vCPU of the VM and ensures the vCPU will run to
  * handle the interrupt.
  */
-static void hf_interrupt_vm(spci_vm_id_t vm_id, uint64_t int_id)
+static void hf_interrupt_vm(ffa_vm_id_t vm_id, uint64_t int_id)
 {
 	struct hf_vm *vm = hf_vm_from_id(vm_id);
-	spci_vcpu_index_t vcpu;
+	ffa_vcpu_index_t vcpu;
 	int64_t ret;
 
 	if (!vm) {
@@ -220,9 +220,9 @@ static void hf_interrupt_vm(spci_vm_id_t vm_id, uint64_t int_id)
 /**
  * Notify all waiters on the given VM.
  */
-static void hf_notify_waiters(spci_vm_id_t vm_id)
+static void hf_notify_waiters(ffa_vm_id_t vm_id)
 {
-	spci_vm_id_t waiter_vm_id;
+	ffa_vm_id_t waiter_vm_id;
 
 	while ((waiter_vm_id = hf_mailbox_waiter_get(vm_id)) != -1) {
 		if (waiter_vm_id == HF_PRIMARY_VM_ID) {
@@ -240,10 +240,10 @@ static void hf_notify_waiters(spci_vm_id_t vm_id)
 /**
  * Delivers a message to a VM.
  */
-static void hf_deliver_message(spci_vm_id_t vm_id)
+static void hf_deliver_message(ffa_vm_id_t vm_id)
 {
 	struct hf_vm *vm = hf_vm_from_id(vm_id);
-	spci_vcpu_index_t i;
+	ffa_vcpu_index_t i;
 
 	if (!vm) {
 		pr_warn("Tried to deliver message to non-existent VM id: %u\n",
@@ -279,7 +279,7 @@ static void hf_handle_message(struct hf_vm *sender, size_t len,
 	/* Ignore messages that are too small to hold a header. */
 	if (len < sizeof(struct hf_msg_hdr)) {
 		pr_err("Message received without header of length %d\n", len);
-		spci_rx_release();
+		ffa_rx_release();
 		return;
 	}
 
@@ -299,7 +299,7 @@ static void hf_handle_message(struct hf_vm *sender, size_t len,
 
 	/* Nothing to do if we couldn't find the target. */
 	if (!hsock) {
-		spci_rx_release();
+		ffa_rx_release();
 		return;
 	}
 
@@ -332,7 +332,7 @@ static void hf_handle_message(struct hf_vm *sender, size_t len,
 exit:
 	sock_put(&hsock->sk);
 
-	if (spci_rx_release().func == SPCI_RX_RELEASE_32)
+	if (ffa_rx_release().func == FFA_RX_RELEASE_32)
 		hf_notify_waiters(HF_PRIMARY_VM_ID);
 }
 
@@ -342,13 +342,13 @@ exit:
 static int hf_vcpu_thread(void *data)
 {
 	struct hf_vcpu *vcpu = data;
-	struct spci_value ret;
+	struct ffa_value ret;
 
 	hrtimer_init(&vcpu->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	vcpu->timer.function = &hf_vcpu_timer_expired;
 
 	while (!kthread_should_stop()) {
-		spci_vcpu_index_t i;
+		ffa_vcpu_index_t i;
 
 		/*
 		 * We're about to run the vcpu, so we can reset the abort-sleep
@@ -357,24 +357,24 @@ static int hf_vcpu_thread(void *data)
 		atomic_set(&vcpu->abort_sleep, 0);
 
 		/* Call into Hafnium to run vcpu. */
-		ret = spci_run(vcpu->vm->id, vcpu->vcpu_index);
+		ret = ffa_run(vcpu->vm->id, vcpu->vcpu_index);
 
 		switch (ret.func) {
 		/* Preempted. */
-		case SPCI_INTERRUPT_32:
+		case FFA_INTERRUPT_32:
 			if (need_resched())
 				schedule();
 			break;
 
 		/* Yield. */
-		case SPCI_YIELD_32:
+		case FFA_YIELD_32:
 			if (!kthread_should_stop())
 				schedule();
 			break;
 
 		/* WFI. */
-		case HF_SPCI_RUN_WAIT_FOR_INTERRUPT:
-			if (ret.arg2 != SPCI_SLEEP_INDEFINITE) {
+		case HF_FFA_RUN_WAIT_FOR_INTERRUPT:
+			if (ret.arg2 != FFA_SLEEP_INDEFINITE) {
 				hrtimer_start(&vcpu->timer, ret.arg2,
 					      HRTIMER_MODE_REL);
 			}
@@ -383,9 +383,9 @@ static int hf_vcpu_thread(void *data)
 			break;
 
 		/* Waiting for a message. */
-		case SPCI_MSG_WAIT_32:
+		case FFA_MSG_WAIT_32:
 			atomic_set(&vcpu->waiting_for_message, 1);
-			if (ret.arg2 != SPCI_SLEEP_INDEFINITE) {
+			if (ret.arg2 != FFA_SLEEP_INDEFINITE) {
 				hrtimer_start(&vcpu->timer, ret.arg2,
 					      HRTIMER_MODE_REL);
 			}
@@ -395,33 +395,33 @@ static int hf_vcpu_thread(void *data)
 			break;
 
 		/* Wake up another vcpu. */
-		case HF_SPCI_RUN_WAKE_UP:
-			hf_handle_wake_up_request(spci_vm_id(ret),
-						  spci_vcpu_index(ret));
+		case HF_FFA_RUN_WAKE_UP:
+			hf_handle_wake_up_request(ffa_vm_id(ret),
+						  ffa_vcpu_index(ret));
 			break;
 
 		/* Response available. */
-		case SPCI_MSG_SEND_32:
-			if (spci_msg_send_receiver(ret) == HF_PRIMARY_VM_ID) {
+		case FFA_MSG_SEND_32:
+			if (ffa_msg_send_receiver(ret) == HF_PRIMARY_VM_ID) {
 				hf_handle_message(vcpu->vm,
-						  spci_msg_send_size(ret),
+						  ffa_msg_send_size(ret),
 						  page_address(hf_recv_page));
 			} else {
-				hf_deliver_message(spci_msg_send_receiver(ret));
+				hf_deliver_message(ffa_msg_send_receiver(ret));
 			}
 			break;
 
 		/* Notify all waiters. */
-		case SPCI_RX_RELEASE_32:
+		case FFA_RX_RELEASE_32:
 			hf_notify_waiters(vcpu->vm->id);
 			break;
 
-		case SPCI_ERROR_32:
-			pr_warn("SPCI error %d running VM %d vCPU %d", ret.arg2,
+		case FFA_ERROR_32:
+			pr_warn("FF-A error %d running VM %d vCPU %d", ret.arg2,
 				vcpu->vm->id, vcpu->vcpu_index);
 			switch (ret.arg2) {
 			/* Abort was triggered. */
-			case SPCI_ABORTED:
+			case FFA_ABORTED:
 				for (i = 0; i < vcpu->vm->vcpu_count; i++) {
 					if (i == vcpu->vcpu_index)
 						continue;
@@ -575,7 +575,7 @@ exit:
 static int hf_send_skb(struct sk_buff *skb)
 {
 	unsigned long flags;
-	struct spci_value ret;
+	struct ffa_value ret;
 	struct hf_sock *hsock = hsock_from_sk(skb->sk);
 	struct hf_vm *vm = hsock->peer_vm;
 	void *message = page_address(hf_send_page);
@@ -587,17 +587,17 @@ static int hf_send_skb(struct sk_buff *skb)
 	spin_lock_irqsave(&hf_send_lock, flags);
 	memcpy(message, skb->data, skb->len);
 
-	ret = spci_msg_send(current_vm_id, vm->id, skb->len, 0);
+	ret = ffa_msg_send(current_vm_id, vm->id, skb->len, 0);
 	spin_unlock_irqrestore(&hf_send_lock, flags);
 
-	if (ret.func == SPCI_ERROR_32) {
+	if (ret.func == FFA_ERROR_32) {
 		switch (ret.arg2) {
-		case SPCI_INVALID_PARAMETERS:
+		case FFA_INVALID_PARAMETERS:
 			return -ENXIO;
-		case SPCI_NOT_SUPPORTED:
+		case FFA_NOT_SUPPORTED:
 			return -EIO;
-		case SPCI_DENIED:
-		case SPCI_BUSY:
+		case FFA_DENIED:
+		case FFA_BUSY:
 		default:
 			return -EAGAIN;
 		}
@@ -805,7 +805,7 @@ static int hf_sock_create(struct net *net, struct socket *sock, int protocol,
 static void hf_free_resources(void)
 {
 	uint16_t i;
-	spci_vcpu_index_t j;
+	ffa_vcpu_index_t j;
 
 	/*
 	 * First stop all worker threads. We need to do this before freeing
@@ -955,10 +955,10 @@ static int __init hf_init(void)
 		.owner = THIS_MODULE,
 	};
 	int64_t ret;
-	struct spci_value spci_ret;
-	spci_vm_id_t i;
-	spci_vcpu_index_t j;
-	spci_vm_count_t secondary_vm_count;
+	struct ffa_value ffa_ret;
+	ffa_vm_id_t i;
+	ffa_vcpu_index_t j;
+	ffa_vm_count_t secondary_vm_count;
 	uint32_t total_vcpu_count;
 
 	/* Allocate a page for send and receive buffers. */
@@ -980,16 +980,16 @@ static int __init hf_init(void)
 	 * because the hypervisor will use them, even if the module is
 	 * unloaded.
 	 */
-	spci_ret = spci_rxtx_map(page_to_phys(hf_send_page),
+	ffa_ret = ffa_rxtx_map(page_to_phys(hf_send_page),
 				 page_to_phys(hf_recv_page));
-	if (spci_ret.func != SPCI_SUCCESS_32) {
+	if (ffa_ret.func != FFA_SUCCESS_32) {
 		__free_page(hf_send_page);
 		__free_page(hf_recv_page);
 		pr_err("Unable to configure VM\n");
-		if (spci_ret.func == SPCI_ERROR_32)
-			pr_err("SPCI error code %d\n", spci_ret.arg2);
+		if (ffa_ret.func == FFA_ERROR_32)
+			pr_err("FF-A error code %d\n", ffa_ret.arg2);
 		else
-			pr_err("Unexpected SPCI function %#x\n", spci_ret.func);
+			pr_err("Unexpected FF-A function %#x\n", ffa_ret.func);
 		return -EIO;
 	}
 
@@ -1020,7 +1020,7 @@ static int __init hf_init(void)
 	total_vcpu_count = 0;
 	for (i = 0; i < secondary_vm_count; i++) {
 		struct hf_vm *vm = &hf_vms[i];
-		spci_vcpu_count_t vcpu_count;
+		ffa_vcpu_count_t vcpu_count;
 
 		/* Adjust the ID as only the secondaries are tracked. */
 		vm->id = i + FIRST_SECONDARY_VM_ID;

@@ -16,7 +16,7 @@
 
 #include <linux/socket.h>
 
-#include <hf/spci.h>
+#include <hf/ffa.h>
 
 /* TODO: Reusing AF_ECONET for now as it's otherwise unused. */
 #define AF_HF AF_ECONET
@@ -27,6 +27,6 @@
  */
 struct hf_sockaddr {
 	__kernel_sa_family_t family;
-	spci_vm_id_t vm_id;
+	ffa_vm_id_t vm_id;
 	uint64_t port;
 };
