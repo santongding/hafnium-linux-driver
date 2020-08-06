@@ -954,6 +954,18 @@ static struct platform_driver hf_int_driver = {
 };
 
 /**
+ * Print the error code of the given FF-A value if it is an error, or the
+ * function ID otherwise.
+ */
+static void print_ffa_error(struct ffa_value ffa_ret)
+{
+	if (ffa_ret.func == FFA_ERROR_32)
+		pr_err("FF-A error code %d\n", ffa_ret.arg2);
+	else
+		pr_err("Unexpected FF-A function %#x\n", ffa_ret.func);
+}
+
+/**
  * Initializes the Hafnium driver by creating a thread for each vCPU of each
  * virtual machine.
  */
@@ -968,7 +980,9 @@ static int __init hf_init(void)
 	struct ffa_value ffa_ret;
 	ffa_vm_id_t i;
 	ffa_vcpu_index_t j;
+	struct ffa_uuid null_uuid;
 	ffa_vm_count_t secondary_vm_count;
+	const struct ffa_partition_info *partition_info;
 	uint32_t total_vcpu_count;
 
 	/* Allocate a page for send and receive buffers. */
@@ -995,16 +1009,22 @@ static int __init hf_init(void)
 				 page_to_phys(hf_recv_page));
 	if (ffa_ret.func != FFA_SUCCESS_32) {
 		pr_err("Unable to configure VM mailbox.\n");
-		if (ffa_ret.func == FFA_ERROR_32)
-			pr_err("FF-A error code %d\n", ffa_ret.arg2);
-		else
-			pr_err("Unexpected FF-A function %#x\n", ffa_ret.func);
+		print_ffa_error(ffa_ret);
 		ret = -EIO;
 		goto fail_with_cleanup;
 	}
 
-	/* Get the number of secondary VMs. */
-	secondary_vm_count = hf_vm_get_count() - 1;
+	/* Get information about secondary VMs. */
+	ffa_uuid_init(0, 0, 0, 0, &null_uuid);
+	ffa_ret = ffa_partition_info_get(&null_uuid);
+	if (ffa_ret.func != FFA_SUCCESS_32) {
+		pr_err("Unable to get VM information.\n");
+		print_ffa_error(ffa_ret);
+		ret = -EIO;
+		goto fail_with_cleanup;
+	}
+	secondary_vm_count = ffa_ret.arg2 - 1;
+	partition_info = page_address(hf_recv_page);
 
 	/* Confirm the maximum number of VMs looks sane. */
 	BUILD_BUG_ON(CONFIG_HAFNIUM_MAX_VMS < 1);
@@ -1035,16 +1055,9 @@ static int __init hf_init(void)
 		struct hf_vm *vm = &hf_vms[i];
 		ffa_vcpu_count_t vcpu_count;
 
-		/* Adjust the ID as only the secondaries are tracked. */
-		vm->id = i + FIRST_SECONDARY_VM_ID;
-
-		vcpu_count = hf_vcpu_get_count(vm->id);
-		if (vcpu_count < 0) {
-			pr_err("HF_VCPU_GET_COUNT failed for vm=%u: %d",
-			       vm->id, vcpu_count);
-			ret = -EIO;
-			goto fail_with_cleanup;
-		}
+		/* Adjust the index as only the secondaries are tracked. */
+		vm->id = partition_info[i + 1].vm_id;
+		vcpu_count = partition_info[i + 1].vcpu_count;
 
 		/* Avoid overflowing the vcpu count. */
 		if (vcpu_count > (U32_MAX - total_vcpu_count)) {
@@ -1097,6 +1110,14 @@ static int __init hf_init(void)
 			atomic_set(&vcpu->abort_sleep, 0);
 			atomic_set(&vcpu->waiting_for_message, 0);
 		}
+	}
+
+	ffa_ret = ffa_rx_release();
+	if (ffa_ret.func != FFA_SUCCESS_32) {
+		pr_err("Unable to release RX buffer.\n");
+		print_ffa_error(ffa_ret);
+		ret = -EIO;
+		goto fail_with_cleanup;
 	}
 
 	/* Register protocol and socket family. */
