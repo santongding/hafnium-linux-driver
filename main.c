@@ -829,6 +829,16 @@ static void hf_free_resources(void)
 	}
 
 	kfree(hf_vms);
+
+	ffa_rx_release();
+	if (hf_send_page) {
+		__free_page(hf_send_page);
+		hf_send_page = NULL;
+	}
+	if (hf_recv_page) {
+		__free_page(hf_recv_page);
+		hf_recv_page = NULL;
+	}
 }
 
 /**
@@ -971,6 +981,7 @@ static int __init hf_init(void)
 	hf_recv_page = alloc_page(GFP_KERNEL);
 	if (!hf_recv_page) {
 		__free_page(hf_send_page);
+		hf_send_page = NULL;
 		pr_err("Unable to allocate receive buffer\n");
 		return -ENOMEM;
 	}
@@ -983,14 +994,13 @@ static int __init hf_init(void)
 	ffa_ret = ffa_rxtx_map(page_to_phys(hf_send_page),
 				 page_to_phys(hf_recv_page));
 	if (ffa_ret.func != FFA_SUCCESS_32) {
-		__free_page(hf_send_page);
-		__free_page(hf_recv_page);
-		pr_err("Unable to configure VM\n");
+		pr_err("Unable to configure VM mailbox.\n");
 		if (ffa_ret.func == FFA_ERROR_32)
 			pr_err("FF-A error code %d\n", ffa_ret.arg2);
 		else
 			pr_err("Unexpected FF-A function %#x\n", ffa_ret.func);
-		return -EIO;
+		ret = -EIO;
+		goto fail_with_cleanup;
 	}
 
 	/* Get the number of secondary VMs. */
@@ -1004,14 +1014,17 @@ static int __init hf_init(void)
 	if (secondary_vm_count > CONFIG_HAFNIUM_MAX_VMS - 1) {
 		pr_err("Number of VMs is out of range: %d\n",
 		       secondary_vm_count);
-		return -EDQUOT;
+		ret = -EDQUOT;
+		goto fail_with_cleanup;
 	}
 
 	/* Only track the secondary VMs. */
 	hf_vms = kmalloc_array(secondary_vm_count, sizeof(struct hf_vm),
 			       GFP_KERNEL);
-	if (!hf_vms)
-		return -ENOMEM;
+	if (!hf_vms) {
+		ret = -ENOMEM;
+		goto fail_with_cleanup;
+	}
 
 	/* Cache the VM id for later usage. */
 	current_vm_id = hf_vm_get_id();
