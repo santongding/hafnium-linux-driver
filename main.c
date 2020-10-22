@@ -363,11 +363,21 @@ static int hf_vcpu_thread(void *data)
 		ret = ffa_run(vcpu->vm->id, vcpu->vcpu_index);
 
 		switch (ret.func) {
-		/* Preempted. */
+		/* Preempted, or wants to wake up another vCPU. */
 		case FFA_INTERRUPT_32:
+		{
+			ffa_vm_id_t vm_id = ffa_vm_id(ret);
+			ffa_vcpu_index_t vcpu_index = ffa_vcpu_index(ret);
+
+			if (vm_id >= FIRST_SECONDARY_VM_ID &&
+			    vm_id != vcpu->vm->id) {
+				/* Wake up another vCPU. */
+				hf_handle_wake_up_request(vm_id, vcpu_index);
+			}
 			if (need_resched())
 				schedule();
 			break;
+		}
 
 		/* Yield. */
 		case FFA_YIELD_32:
@@ -395,12 +405,6 @@ static int hf_vcpu_thread(void *data)
 			hf_vcpu_sleep(vcpu);
 			hrtimer_cancel(&vcpu->timer);
 			atomic_set(&vcpu->waiting_for_message, 0);
-			break;
-
-		/* Wake up another vcpu. */
-		case HF_FFA_RUN_WAKE_UP:
-			hf_handle_wake_up_request(ffa_vm_id(ret),
-						  ffa_vcpu_index(ret));
 			break;
 
 		/* Response available. */
