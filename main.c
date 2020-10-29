@@ -42,6 +42,7 @@
 #define CONFIG_HAFNIUM_MAX_VCPUS 32
 
 #define HF_VM_ID_BASE 0
+#define PRIMARY_VM_ID HF_VM_ID_OFFSET
 #define FIRST_SECONDARY_VM_ID (HF_VM_ID_OFFSET + 1)
 
 struct hf_vcpu {
@@ -226,7 +227,7 @@ static void hf_notify_waiters(ffa_vm_id_t vm_id)
 	ffa_vm_id_t waiter_vm_id;
 
 	while ((waiter_vm_id = hf_mailbox_waiter_get(vm_id)) != -1) {
-		if (waiter_vm_id == HF_PRIMARY_VM_ID) {
+		if (waiter_vm_id == PRIMARY_VM_ID) {
 			/*
 			 * TODO: Use this information when implementing per-vm
 			 * queues.
@@ -334,7 +335,7 @@ exit:
 	sock_put(&hsock->sk);
 
 	if (ffa_rx_release().func == FFA_RX_RELEASE_32)
-		hf_notify_waiters(HF_PRIMARY_VM_ID);
+		hf_notify_waiters(PRIMARY_VM_ID);
 }
 
 /**
@@ -403,7 +404,7 @@ static int hf_vcpu_thread(void *data)
 
 		/* Response available. */
 		case FFA_MSG_SEND_32:
-			if (ffa_msg_send_receiver(ret) == HF_PRIMARY_VM_ID) {
+			if (ffa_msg_send_receiver(ret) == PRIMARY_VM_ID) {
 				hf_handle_message(vcpu->vm,
 						  ffa_msg_send_size(ret),
 						  page_address(hf_recv_page));
