@@ -33,6 +33,7 @@
 #include <hf/call.h>
 #include <hf/ffa.h>
 #include <hf/transport.h>
+#include <hf/vm_ids.h>
 
 #include "uapi/hf/socket.h"
 
