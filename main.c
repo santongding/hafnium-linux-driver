@@ -405,12 +405,12 @@ static int hf_vcpu_thread(void *data)
 
 		/* Response available. */
 		case FFA_MSG_SEND_32:
-			if (ffa_msg_send_receiver(ret) == PRIMARY_VM_ID) {
+			if (ffa_receiver(ret) == PRIMARY_VM_ID) {
 				hf_handle_message(vcpu->vm,
 						  ffa_msg_send_size(ret),
 						  page_address(hf_recv_page));
 			} else {
-				hf_deliver_message(ffa_msg_send_receiver(ret));
+				hf_deliver_message(ffa_receiver(ret));
 			}
 			break;
 
