@@ -19,7 +19,7 @@ ifneq ($(KERNELRELEASE),)
 obj-m += hafnium.o
 
 hafnium-y += main.o
-hafnium-y += vmlib/aarch64/call.o
+hafnium-y += vmlib/aarch64/hvc_call.o
 hafnium-y += vmlib/ffa.o
 
 ccflags-y = -I$(HAFNIUM_PATH)/inc/vmapi -I$(M)/inc
