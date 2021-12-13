@@ -1019,7 +1019,7 @@ static int __init hf_init(void)
 
 	/* Get information about secondary VMs. */
 	ffa_uuid_init(0, 0, 0, 0, &null_uuid);
-	ffa_ret = ffa_partition_info_get(&null_uuid);
+	ffa_ret = ffa_partition_info_get(&null_uuid, 0);
 	if (ffa_ret.func != FFA_SUCCESS_32) {
 		pr_err("Unable to get VM information.\n");
 		print_ffa_error(ffa_ret);
