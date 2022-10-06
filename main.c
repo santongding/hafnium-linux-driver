@@ -12,7 +12,12 @@
  * GNU General Public License for more details.
  */
 
+#include "uapi/hf/socket.h"
 #include <clocksource/arm_arch_timer.h>
+#include <hf/call.h>
+#include <hf/ffa.h>
+#include <hf/transport.h>
+#include <hf/vm_ids.h>
 #include <linux/atomic.h>
 #include <linux/cpuhotplug.h>
 #include <linux/hrtimer.h>
@@ -30,21 +35,16 @@
 #include <linux/slab.h>
 #include <net/sock.h>
 
-#include <hf/call.h>
-#include <hf/ffa.h>
-#include <hf/transport.h>
-#include <hf/vm_ids.h>
+#define HYPERVISOR_TIMER_NAME "el1_timer"
 
-#include "uapi/hf/socket.h"
-
-#define HYPERVISOR_TIMER_NAME "el2_timer"
-
-#define CONFIG_HAFNIUM_MAX_VMS   16
+#define CONFIG_HAFNIUM_MAX_VMS 16
 #define CONFIG_HAFNIUM_MAX_VCPUS 32
 
 #define HF_VM_ID_BASE 0
 #define PRIMARY_VM_ID HF_VM_ID_OFFSET
 #define FIRST_SECONDARY_VM_ID (HF_VM_ID_OFFSET + 1)
+
+static ffa_vm_id_t ignore_ids[] = { 2 };
 
 struct hf_vcpu {
 	struct hf_vm *vm;
@@ -80,12 +80,17 @@ static struct proto hf_sock_proto = {
 	.obj_size = sizeof(struct hf_sock),
 };
 
+
+
 static struct hf_vm *hf_vms;
 static ffa_vm_count_t hf_vm_count;
-static struct page *hf_send_page;
-static struct page *hf_recv_page;
+struct page *hf_send_page;
+struct page *hf_recv_page;
 static atomic64_t hf_next_port = ATOMIC64_INIT(0);
-static DEFINE_SPINLOCK(hf_send_lock);
+DEFINE_SPINLOCK(hf_send_lock);
+EXPORT_SYMBOL(hf_send_lock);
+EXPORT_SYMBOL(hf_send_page);
+EXPORT_SYMBOL(hf_recv_page);
 static DEFINE_HASHTABLE(hf_local_port_hash, 7);
 static DEFINE_SPINLOCK(hf_local_port_hash_lock);
 static int hf_irq;
@@ -158,8 +163,7 @@ static enum hrtimer_restart hf_vcpu_timer_expired(struct hrtimer *timer)
  *
  * It wakes up the thread if it's sleeping, or kicks it if it's already running.
  */
-static void hf_handle_wake_up_request(ffa_vm_id_t vm_id,
-				      ffa_vcpu_index_t vcpu)
+static void hf_handle_wake_up_request(ffa_vm_id_t vm_id, ffa_vcpu_index_t vcpu)
 {
 	struct hf_vm *vm = hf_vm_from_id(vm_id);
 
@@ -169,8 +173,8 @@ static void hf_handle_wake_up_request(ffa_vm_id_t vm_id,
 	}
 
 	if (vcpu >= vm->vcpu_count) {
-		pr_warn("Request to wake up non-existent vCPU: %u.%u\n",
-			vm_id, vcpu);
+		pr_warn("Request to wake up non-existent vCPU: %u.%u\n", vm_id,
+			vcpu);
 		return;
 	}
 
@@ -291,7 +295,8 @@ static void hf_handle_message(struct hf_vm *sender, size_t len,
 	/* Go through the colliding sockets. */
 	rcu_read_lock();
 	hash_for_each_possible_rcu(hf_local_port_hash, hsock, sk.sk_node,
-				   hdr->dst_port) {
+				   hdr->dst_port)
+	{
 		if (hsock->peer_vm == sender &&
 		    hsock->remote_port == hdr->src_port) {
 			sock_hold(&hsock->sk);
@@ -347,6 +352,21 @@ static int hf_vcpu_thread(void *data)
 	struct hf_vcpu *vcpu = data;
 	struct ffa_value ret;
 
+	bool is_ignored = false;
+	int j;
+	pr_info("vm %u thread start", vcpu->vm->id);
+	for(j = 0; j < sizeof(ignore_ids); j++){
+		if(vcpu->vm->id == ignore_ids[j]){
+			pr_info("vm %u is ignored", ignore_ids[j]);
+			is_ignored = true;
+			break;
+		}
+	}
+	if(is_ignored){
+		while (!kthread_should_stop()){}
+	}
+
+
 	hrtimer_init(&vcpu->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	vcpu->timer.function = &hf_vcpu_timer_expired;
 
@@ -364,8 +384,7 @@ static int hf_vcpu_thread(void *data)
 
 		switch (ret.func) {
 		/* Preempted, or wants to wake up another vCPU. */
-		case FFA_INTERRUPT_32:
-		{
+		case FFA_INTERRUPT_32: {
 			ffa_vm_id_t vm_id = ffa_vm_id(ret);
 			ffa_vcpu_index_t vcpu_index = ffa_vcpu_index(ret);
 
@@ -836,6 +855,7 @@ static void hf_free_resources(void)
 	kfree(hf_vms);
 
 	ffa_rx_release();
+	ffa_rxtx_unmap();
 	if (hf_send_page) {
 		__free_page(hf_send_page);
 		hf_send_page = NULL;
@@ -899,7 +919,7 @@ static int hf_int_driver_probe(struct platform_device *pdev)
 	 * Hafnium to emulate the virtual timer for Linux while a secondary vCPU
 	 * is running.
 	 */
-	irq = platform_get_irq(pdev, ARCH_TIMER_HYP_PPI);
+	irq = platform_get_irq(pdev, ARCH_TIMER_PHYS_SECURE_PPI);
 	if (irq < 0) {
 		pr_err("Error getting hypervisor timer IRQ: %d\n", irq);
 		return irq;
@@ -909,8 +929,8 @@ static int hf_int_driver_probe(struct platform_device *pdev)
 	ret = request_percpu_irq(irq, hf_nop_irq_handler, HYPERVISOR_TIMER_NAME,
 				 pdev);
 	if (ret != 0) {
-		pr_err("Error registering hypervisor timer IRQ %d: %d\n",
-		       irq, ret);
+		pr_err("Error registering hypervisor timer IRQ %d: %d\n", irq,
+		       ret);
 		return ret;
 	}
 	pr_info("Hafnium registered for IRQ %d\n", irq);
@@ -926,6 +946,7 @@ static int hf_int_driver_probe(struct platform_device *pdev)
 
 	return 0;
 }
+
 
 /**
  * Unregisters for the hypervisor timer interrupt.
@@ -945,15 +966,15 @@ static int hf_int_driver_remove(struct platform_device *pdev)
 static const struct of_device_id hf_int_driver_id[] = {
 	{.compatible = "arm,armv7-timer"},
 	{.compatible = "arm,armv8-timer"},
-	{}
-};
+	{}};
 
 static struct platform_driver hf_int_driver = {
-	.driver = {
-		.name = HYPERVISOR_TIMER_NAME,
-		.owner = THIS_MODULE,
-		.of_match_table = of_match_ptr(hf_int_driver_id),
-	},
+	.driver =
+		{
+			.name = HYPERVISOR_TIMER_NAME,
+			.owner = THIS_MODULE,
+			.of_match_table = of_match_ptr(hf_int_driver_id),
+		},
 	.probe = hf_int_driver_probe,
 	.remove = hf_int_driver_remove,
 };
@@ -969,13 +990,32 @@ static void print_ffa_error(struct ffa_value ffa_ret)
 	else
 		pr_err("Unexpected FF-A function %#x\n", ffa_ret.func);
 }
+static inline void usr_client_echo(void)
+{
+	unsigned long flags;
+	static char * echo_msg = "Hello, vm!";
+	void *message = page_address(hf_send_page);
+	struct hf_msg_hdr *hdr = message;
+	spin_lock_irqsave(&hf_send_lock, flags);
+	hdr->src_port = hf_vm_get_id();
+	hdr->dst_port = 2;
+	int len = strlen(echo_msg) + 1;
+	pr_info("msg len:%d\n", len);
+	memcpy(message + sizeof(struct hf_msg_hdr), echo_msg, len);
+	struct ffa_value ret =
+		ffa_msg_send(current_vm_id, 2,
+			     len + sizeof(struct hf_msg_hdr), 0);
+	spin_unlock_irqrestore(&hf_send_lock, flags);
 
+	pr_info("ret code: %x",ret.func);
+}
 /**
  * Initializes the Hafnium driver by creating a thread for each vCPU of each
  * virtual machine.
  */
 static int __init hf_init(void)
 {
+	pr_info("spin lock addr: %x", &hf_send_lock);
 	static const struct net_proto_family proto_family = {
 		.family = PF_HF,
 		.create = hf_sock_create,
@@ -1011,7 +1051,7 @@ static int __init hf_init(void)
 	 * unloaded.
 	 */
 	ffa_ret = ffa_rxtx_map(page_to_phys(hf_send_page),
-				 page_to_phys(hf_recv_page));
+			       page_to_phys(hf_recv_page));
 	if (ffa_ret.func != FFA_SUCCESS_32) {
 		pr_err("Unable to configure VM mailbox.\n");
 		print_ffa_error(ffa_ret);
@@ -1028,6 +1068,8 @@ static int __init hf_init(void)
 		ret = -EIO;
 		goto fail_with_cleanup;
 	}
+	pr_info("secondary vm count:%d\n",ffa_ret.arg2);
+
 	secondary_vm_count = ffa_ret.arg2 - 1;
 	partition_info = page_address(hf_recv_page);
 
@@ -1054,6 +1096,8 @@ static int __init hf_init(void)
 	/* Cache the VM id for later usage. */
 	current_vm_id = hf_vm_get_id();
 
+	pr_info("current id is %d\n",current_vm_id);
+
 	/* Initialize each VM. */
 	total_vcpu_count = 0;
 	for (i = 0; i < secondary_vm_count; i++) {
@@ -1064,6 +1108,7 @@ static int __init hf_init(void)
 		vm->id = partition_info[i + 1].vm_id;
 		vcpu_count = partition_info[i + 1].vcpu_count;
 
+		pr_info("sec vm id:%d\n", vm->id);
 		/* Avoid overflowing the vcpu count. */
 		if (vcpu_count > (U32_MAX - total_vcpu_count)) {
 			pr_err("Too many vcpus: %u\n", total_vcpu_count);
@@ -1102,7 +1147,8 @@ static int __init hf_init(void)
 				kthread_create(hf_vcpu_thread, vcpu,
 					       "vcpu_thread_%u_%u", vm->id, j);
 			if (IS_ERR(vcpu->task)) {
-				pr_err("Error creating task (vm=%u,vcpu=%u): %ld\n",
+				pr_err("Error creating task (vm=%u,vcpu=%u): "
+				       "%ld\n",
 				       vm->id, j, PTR_ERR(vcpu->task));
 				vm->vcpu_count = j;
 				ret = PTR_ERR(vcpu->task);
